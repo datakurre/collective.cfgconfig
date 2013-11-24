@@ -4,26 +4,65 @@ import os
 import sys
 from pkgutil import ImpLoader
 
+NAMESPACES = {
+    '': 'http://namespaces.zope.org/zope',
+    'meta': 'http://namespaces.zope.org/meta',
+    'zcml': 'http://namespaces.zope.org/zcml',
+    'grok': 'http://namespaces.zope.org/grok',
+    'browser': 'http://namespaces.zope.org/browser',
+    'genericsetup': 'http://namespaces.zope.org/genericsetup',
+    'i18n': 'http://namespaces.zope.org/i18n'
+}
+
 
 def processcfgfile(file, context, testing=False):
-    """Patch zope.configuration.xmlconfig.processxmlfile with cfg support"""
-    from zope.configuration.xmlconfig import _processxmlfile
-    if file.name.endswith('.zcml'):
-        return _processxmlfile(file, context, testing)
+    """Process a configuration file (cfg)"""
 
     import ConfigParser
     config = ConfigParser.RawConfigParser()
     config.readfp(file)
+    sections = config._sections
 
-    for section in config.sections():
+    # Define namespaces
+    namespaces = NAMESPACES.copy()
+    if 'namespaces' in sections:
+        namespaces.update(config.items('namespaces'))
+        sections.pop('namespaces', None)
+
+    from zope.configuration.xmlconfig import ConfigurationHandler
+    handler = ConfigurationHandler(context, testing=testing)
+
+    # Read directives in resolved order
+    for section in sections:
+        # Read arguments
+        data = sections.get(section, {})
+        data.pop('__name__', None)
+
+        # Resolve condition
+        condition = data.pop('condition', None)
+        if condition:
+            if not handler.evaluateCondition(condition):
+                continue
+
+        # Resolve namespace and directive
         name = section.split(':')[:-1]
         if len(name) == 1:
-            name = ['http://namespaces.zope.org/zope', name[0]]
+            name = [namespaces[''], name[0]]
         else:
-            name[0] = 'http://namespaces.zope.org/' + name[0]
-        data = dict(config.items(section))
+            name[0] = namespaces[name[0]]
+
+        # Configure!
         context.begin(tuple(name), data)
         context.end()
+
+
+def processxmlfile(file, context, testing=False):
+    """Process a configuration file (either zcml or cfg)"""
+    from zope.configuration.xmlconfig import _processxmlfile
+    if file.name.endswith('.zcml'):
+        return _processxmlfile(file, context, testing)
+    else:
+        return processcfgfile(file, context, testing)
 
 
 class MonkeyPatcher(ImpLoader):
@@ -32,7 +71,6 @@ class MonkeyPatcher(ImpLoader):
     implements a get_data hook to intercept the component.xml loading and give
     us a point to generate it.
     """
-
     def __init__(self, module):
         name = module.__name__
         path = os.path.dirname(module.__file__)
@@ -47,7 +85,7 @@ class MonkeyPatcher(ImpLoader):
                     zope.configuration.xmlconfig.processxmlfile)
             setattr(zope.configuration.xmlconfig,
                     'processxmlfile',
-                    processcfgfile)
+                    processxmlfile)
             return '<component></component>'
         return super(MonkeyPatcher, self).get_data(self, pathname)
 
